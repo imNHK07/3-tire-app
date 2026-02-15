@@ -1,0 +1,138 @@
+name: Build and Deploy 3-Tier E-Commerce App
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ github.repository }}
+  SERVER_IP: 98.86.164.130
+  SERVER_USER: root
+  DEPLOY_PATH: /opt/ecommerce-app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/ecommerce-backend:latest
+            ${{ secrets.DOCKER_USERNAME }}/ecommerce-backend:${{ github.sha }}
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/ecommerce-frontend:latest
+            ${{ secrets.DOCKER_USERNAME }}/ecommerce-frontend:${{ github.sha }}
+
+      - name: Build and push App image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/ecommerce-app:latest
+            ${{ secrets.DOCKER_USERNAME }}/ecommerce-app:${{ github.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Create deployment directory and copy files
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+            mkdir -p ${{ env.DEPLOY_PATH }}
+            cd ${{ env.DEPLOY_PATH }}
+          EOF
+
+      - name: Copy docker-compose configuration
+        run: |
+          scp -i ~/.ssh/id_rsa -r ./Db/docker-compose.yml ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:${{ env.DEPLOY_PATH }}/
+          scp -i ~/.ssh/id_rsa -r ./.github/workflows/production-docker-compose.yml ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:${{ env.DEPLOY_PATH }}/docker-compose.yml
+
+      - name: Pull images and deploy on server
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+            cd ${{ env.DEPLOY_PATH }}
+            docker pull ${{ secrets.DOCKER_USERNAME }}/ecommerce-backend:latest
+            docker pull ${{ secrets.DOCKER_USERNAME }}/ecommerce-frontend:latest
+            docker pull ${{ secrets.DOCKER_USERNAME }}/ecommerce-app:latest
+            docker-compose down || true
+            docker-compose up -d
+            docker system prune -f
+          EOF
+
+      - name: Verify deployment
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+            cd ${{ env.DEPLOY_PATH }}
+            echo "Running containers:"
+            docker ps
+            echo "Docker-compose services status:"
+            docker-compose ps
+          EOF
+
+      - name: Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          payload: |
+            {
+              "text": "Deployment Status",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*E-Commerce App Deployment*\nStatus: ${{ job.status }}\nCommit: ${{ github.sha }}\nRef: ${{ github.ref }}"
+                  }
+                }
+              ]
+            }
+        continue-on-error: true
