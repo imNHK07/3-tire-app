@@ -33,7 +33,7 @@ jobs:
             cd /home/misl
             rm -rf *
             cd /tmp
-            git clone https://github.com/imNHK07/CI-CD-.git temp-repo
+            git clone https://github.com/imNHK07/3-tire-app.git temp-repo
             cp -r temp-repo/* /home/misl
             rm -rf temp-repo
             cd /home/misl
